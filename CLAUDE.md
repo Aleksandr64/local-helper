@@ -31,7 +31,8 @@ Diferrent Tools/
 ├── registry.json         # підключені командою `add` зовнішні тули (шляхи на цьому ПК, не в git)
 ├── groups.json           # групи тулів: ім'я тулу → група (в git)
 ├── GUIDE.md              # повний посібник користувача
-├── README.md             # короткий огляд, швидкий старт, таблиця тулів
+├── README.md             # вітрина для GitHub: можливості, швидкий старт, таблиця тулів
+├── docs/screenshot.svg   # знімок TUI для README (генерується через App.save_screenshot)
 ├── requirements.txt      # залежності лаунчера (textual)
 ├── tests/                # unittest: test_local_helper.py, test_tui.py, test_<tool>.py
 └── tools/
