@@ -13,9 +13,10 @@ from textual import on, work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.css.query import NoMatches
 from textual.screen import ModalScreen
-from textual.widgets import (Button, Checkbox, Footer, Header, Input, Label, ListItem, ListView,
-                             RichLog, Select, Static)
+from textual.suggester import SuggestFromList
+from textual.widgets import Button, Checkbox, Footer, Header, Input, Label, RichLog, Select, Static, Tree
 
 import local_helper as lh
 
@@ -37,19 +38,27 @@ def is_required(spec: dict) -> bool:
     return spec["nargs"] in (None, "+") or (spec["nargs"] or "").isdigit()
 
 
-class ToolItem(ListItem):
-    def __init__(self, tool: lh.Tool) -> None:
-        label = Text(tool.name, style="bold")
-        if tool.source == "added":
-            label.append("  added", style="italic cyan")
-        if tool.missing:
-            label.append("  не знайдено", style="italic red")
-        super().__init__(Label(label))
-        self.tool_name = tool.name
+def tool_label(tool: lh.Tool) -> Text:
+    label = Text(tool.name, style="bold")
+    if tool.source == "added":
+        label.append("  added", style="italic cyan")
+    if tool.missing:
+        label.append("  не знайдено", style="italic red")
+    return label
+
+
+def group_input(groups: list[str], value: str = "", input_id: str = "group") -> Input:
+    """Поле групи з автодоповненням існуючих назв (→ щоб прийняти підказку)."""
+    return Input(value=value, placeholder=", ".join(groups) or "напр. Фото", id=input_id,
+                 suggester=SuggestFromList(groups, case_sensitive=False))
 
 
 class AddToolScreen(ModalScreen[dict | None]):
     BINDINGS = [Binding("escape", "dismiss(None)", "Скасувати")]
+
+    def __init__(self, groups: list[str]) -> None:
+        super().__init__()
+        self.groups = groups
 
     def compose(self) -> ComposeResult:
         with Vertical(classes="dialog"):
@@ -60,6 +69,8 @@ class AddToolScreen(ModalScreen[dict | None]):
             yield Input(placeholder="за замовчуванням — ім'я папки", id="add-name")
             yield Label("Головний файл (необов'язково, якщо .py кілька)")
             yield Input(placeholder="main.py", id="add-entry")
+            yield Label("Група (необов'язково)")
+            yield group_input(self.groups, input_id="add-group")
             with Horizontal(classes="buttons"):
                 yield Button("Додати", variant="primary", id="add-ok")
                 yield Button("Скасувати", id="add-cancel")
@@ -73,7 +84,8 @@ class AddToolScreen(ModalScreen[dict | None]):
             return
         self.dismiss({"path": path,
                       "name": self.query_one("#add-name", Input).value.strip() or None,
-                      "entry": self.query_one("#add-entry", Input).value.strip() or None})
+                      "entry": self.query_one("#add-entry", Input).value.strip() or None,
+                      "group": self.query_one("#add-group", Input).value.strip() or None})
 
     @on(Button.Pressed, "#add-cancel")
     def cancel(self) -> None:
@@ -83,6 +95,11 @@ class AddToolScreen(ModalScreen[dict | None]):
 class NewToolScreen(ModalScreen[dict | None]):
     BINDINGS = [Binding("escape", "dismiss(None)", "Скасувати")]
 
+    def __init__(self, groups: list[str], group: str = "") -> None:
+        super().__init__()
+        self.groups = groups
+        self.group = group
+
     def compose(self) -> ComposeResult:
         with Vertical(classes="dialog"):
             yield Static(Text("Новий тул (шаблон у tools/<ім'я>/main.py)", style="bold"))
@@ -90,6 +107,8 @@ class NewToolScreen(ModalScreen[dict | None]):
             yield Input(placeholder="rename_photos", id="new-name")
             yield Label("Короткий опис (перший рядок у списку)")
             yield Input(placeholder="Перейменовує фото за датою зйомки", id="new-desc")
+            yield Label("Група (необов'язково)")
+            yield group_input(self.groups, self.group, input_id="new-group")
             with Horizontal(classes="buttons"):
                 yield Button("Створити", variant="primary", id="new-ok")
                 yield Button("Скасувати", id="new-cancel")
@@ -105,9 +124,43 @@ class NewToolScreen(ModalScreen[dict | None]):
         if err:
             self.notify(err, severity="error", markup=False)
             return
-        self.dismiss({"name": name, "description": self.query_one("#new-desc", Input).value.strip()})
+        self.dismiss({"name": name, "description": self.query_one("#new-desc", Input).value.strip(),
+                      "group": self.query_one("#new-group", Input).value.strip() or None})
 
     @on(Button.Pressed, "#new-cancel")
+    def cancel(self) -> None:
+        self.dismiss(None)
+
+
+class GroupScreen(ModalScreen[str | None]):
+    """Повертає нову назву групи, "" — прибрати з групи, None — скасовано."""
+    BINDINGS = [Binding("escape", "dismiss(None)", "Скасувати")]
+
+    def __init__(self, tool: lh.Tool, groups: list[str]) -> None:
+        super().__init__()
+        self.tool = tool
+        self.groups = groups
+
+    def compose(self) -> ComposeResult:
+        with Vertical(classes="dialog"):
+            yield Static(Text(f"Група для «{self.tool.name}»", style="bold"))
+            yield Label("Існуюча або нова група (→ — прийняти підказку)")
+            yield group_input(self.groups, self.tool.group or "")
+            with Horizontal(classes="buttons"):
+                yield Button("Зберегти", variant="primary", id="grp-ok")
+                yield Button("Прибрати з групи", id="grp-clear", disabled=not self.tool.group)
+                yield Button("Скасувати", id="grp-cancel")
+
+    @on(Button.Pressed, "#grp-ok")
+    @on(Input.Submitted)
+    def submit(self) -> None:
+        self.dismiss(self.query_one("#group", Input).value.strip())
+
+    @on(Button.Pressed, "#grp-clear")
+    def clear(self) -> None:
+        self.dismiss("")
+
+    @on(Button.Pressed, "#grp-cancel")
     def cancel(self) -> None:
         self.dismiss(None)
 
@@ -197,6 +250,7 @@ class LocalHelperApp(App):
         Binding("slash", "search", "Пошук"),
         Binding("ctrl+w", "workdir", "Папка", priority=True),
         Binding("n", "new", "Новий"),
+        Binding("g", "group", "Група"),
         Binding("a", "add", "Додати"),
         Binding("d", "remove", "Відключити"),
         Binding("r", "reload", "Оновити"),
@@ -211,6 +265,7 @@ class LocalHelperApp(App):
         self.specs: dict[str, list[dict] | None] = {}  # кеш опису аргументів
         self.values: dict[str, dict] = {}  # значення форми по тулах
         self.extras: dict[str, str] = {}
+        self.collapsed: set[str] = set()  # згорнуті групи (поки TUI відкритий)
         self.proc: asyncio.subprocess.Process | None = None
 
     def notify(self, message: str, *, markup: bool = False, **kwargs) -> None:
@@ -225,7 +280,10 @@ class LocalHelperApp(App):
                 yield Static(Text(BANNER), id="banner")
                 yield Static(id="banner-info")
                 yield Input(placeholder="пошук тулу  ( / )", id="search")
-                yield ListView(id="tools")
+                tree: Tree[tuple[str, str]] = Tree("тули", id="tools")
+                tree.show_root = False
+                tree.guide_depth = 2
+                yield tree
             with Vertical(id="detail"):
                 with VerticalScroll(id="top"):
                     yield Static(id="title")
@@ -246,53 +304,100 @@ class LocalHelperApp(App):
     async def on_mount(self) -> None:
         self.set_outhead("Вивід")
         await self.reload_tools()
-        self.query_one("#tools", ListView).focus()
+        self.query_one("#tools", Tree).focus()
 
-    # ---------- список тулів ----------
+    # ---------- дерево тулів ----------
     async def reload_tools(self) -> None:
         self.tools = lh.discover()
         self.specs.clear()
         self.update_info()
-        await self.fill_list(self.query_one("#search", Input).value)
+        self.fill_tree(self.query_one("#search", Input).value)
+
+    def group_names(self) -> list[str]:
+        return [g for g, _ in lh.ordered(self.tools) if g != lh.NO_GROUP]
 
     def update_info(self) -> None:
         self.sub_title = f"робоча папка: {self.workdir}"
         added = sum(t.source == "added" for t in self.tools.values())
         self.query_one("#banner-info", Static).update(
-            Text(f"тулів: {len(self.tools)}  (підключених: {added})"))
+            Text(f"тулів: {len(self.tools)} · груп: {len(self.group_names())} · підключених: {added}"))
 
-    async def fill_list(self, query: str) -> None:
+    def fill_tree(self, query: str, select: str | None = None) -> None:
+        """Перебудувати дерево: групи → тули. Курсор — на `select`, поточний або перший тул."""
         q = query.strip().lower()
-        shown = [t for t in self.tools.values()
-                 if not q or q in t.name.lower() or q in t.doc.lower()]
-        lv = self.query_one("#tools", ListView)
-        await lv.clear()
-        await lv.extend(ToolItem(t) for t in shown)
-        names = [t.name for t in shown]
-        if self.current and self.current.name in names:
-            lv.index = names.index(self.current.name)
-        elif names:
-            lv.index = 0
-        else:
+        shown = {n: t for n, t in self.tools.items()
+                 if not q or q in t.name.lower() or q in t.doc.lower() or q in (t.group or "").lower()}
+        tree = self.query_one("#tools", Tree)
+        tree.clear()
+        has_groups = bool(self.group_names())
+        want = select or (self.current.name if self.current else None)
+        target = first = None
+        for group, group_tools in lh.ordered(shown):
+            parent = tree.root
+            if has_groups:
+                label = Text(group, style="bold dim" if group == lh.NO_GROUP else "bold")
+                label.append(f"  {len(group_tools)}", style="dim")
+                parent = tree.root.add(label, data=("group", group),
+                                       expand=bool(q) or group not in self.collapsed)
+            for t in group_tools:
+                node = parent.add_leaf(tool_label(t), data=("tool", t.name))
+                first = first or node
+                if t.name == want:
+                    target = node
+        target = target or first
+        if target is None:
             self.show_tool(None)
+            return
+        if target.parent is not None and not target.parent.is_expanded and target.parent is not tree.root:
+            target.parent.expand()
+        tree.call_after_refresh(tree.move_cursor, target)
+        # курсор може лишитися на тому ж рядку (тоді NodeHighlighted не прийде) — показуємо тул явно
+        tool = self.tools.get(target.data[1])
+        if tool is not self.current:
+            self.show_tool(tool)
+
+    def visible_tools(self) -> list[str]:
+        """Імена тулів у дереві в порядку показу (для тестів і навігації)."""
+        out = []
+
+        def walk(node) -> None:
+            for child in node.children:
+                if child.data and child.data[0] == "tool":
+                    out.append(child.data[1])
+                walk(child)
+        walk(self.query_one("#tools", Tree).root)
+        return out
 
     @on(Input.Changed, "#search")
-    async def search_changed(self, event: Input.Changed) -> None:
-        await self.fill_list(event.value)
+    def search_changed(self, event: Input.Changed) -> None:
+        self.fill_tree(event.value)
 
     @on(Input.Submitted, "#search")
     def search_submitted(self) -> None:
-        self.query_one("#tools", ListView).focus()
+        self.query_one("#tools", Tree).focus()
 
-    @on(ListView.Highlighted, "#tools")
-    def tool_highlighted(self, event: ListView.Highlighted) -> None:
-        if isinstance(event.item, ToolItem):
-            tool = self.tools.get(event.item.tool_name)
+    @on(Tree.NodeCollapsed, "#tools")
+    def group_collapsed(self, event: Tree.NodeCollapsed) -> None:
+        if event.node.data and event.node.data[0] == "group":
+            self.collapsed.add(event.node.data[1])
+
+    @on(Tree.NodeExpanded, "#tools")
+    def group_expanded(self, event: Tree.NodeExpanded) -> None:
+        if event.node.data and event.node.data[0] == "group":
+            self.collapsed.discard(event.node.data[1])
+
+    @on(Tree.NodeHighlighted, "#tools")
+    def tool_highlighted(self, event: Tree.NodeHighlighted) -> None:
+        data = event.node.data
+        if data and data[0] == "tool":
+            tool = self.tools.get(data[1])
             if tool is not self.current:
                 self.show_tool(tool)
 
-    @on(ListView.Selected, "#tools")
-    def tool_selected(self) -> None:
+    @on(Tree.NodeSelected, "#tools")
+    def tool_selected(self, event: Tree.NodeSelected) -> None:
+        if not (event.node.data and event.node.data[0] == "tool"):
+            return  # Enter на групі — згорнути/розгорнути (робить сам Tree)
         fields = self.query(".field")
         (fields.first() if fields else self.query_one("#extra", Input)).focus()
 
@@ -320,6 +425,12 @@ class LocalHelperApp(App):
 
     @work(exclusive=True, group="form")
     async def load_form(self, tool: lh.Tool) -> None:
+        try:
+            await self._load_form(tool)
+        except NoMatches:
+            pass  # інтерфейс закрили, поки читались параметри
+
+    async def _load_form(self, tool: lh.Tool) -> None:
         form = self.query_one("#form", Vertical)
         await form.remove_children()
         if tool.name not in self.specs:
@@ -475,38 +586,56 @@ class LocalHelperApp(App):
                 self.update_info()
         self.push_screen(WorkdirScreen(self.workdir), done)
 
+    # Шляхи до файлів беруться з модуля lh під час виклику (а не з дефолтів), щоб їх можна було підмінити в тестах.
     def action_add(self) -> None:
         async def done(result: dict | None) -> None:
             if not result:
                 return
-            code, msg = captured(lh.cmd_add, result["path"], result["name"], result["entry"])
+            before = set(self.tools)
+            code, msg = captured(lh.cmd_add, result["path"], result["name"], result["entry"],
+                                 lh.TOOLS_DIR, lh.REGISTRY, result["group"], lh.GROUPS)
             self.notify(msg or "Готово", severity="information" if code == 0 else "error", timeout=8)
             if code == 0:
-                await self.reload_tools()
-        self.push_screen(AddToolScreen(), done)
+                new = sorted(set(lh.discover()) - before)
+                await self.select_tool(new[0] if new else None)
+        self.push_screen(AddToolScreen(self.group_names()), done)
 
     def action_new(self) -> None:
         async def done(result: dict | None) -> None:
             if not result:
                 return
-            code, msg = captured(lh.cmd_new, result["name"], lh.TOOLS_DIR, result["description"])
+            code, msg = captured(lh.cmd_new, result["name"], lh.TOOLS_DIR, result["description"],
+                                 result["group"], lh.GROUPS)
             self.notify(msg, severity="information" if code == 0 else "error", timeout=10)
             if code == 0:
                 await self.select_tool(result["name"])
-        self.push_screen(NewToolScreen(), done)
+        group = self.current.group if self.current and self.current.group else ""
+        self.push_screen(NewToolScreen(self.group_names(), group), done)
 
-    async def select_tool(self, name: str) -> None:
+    def action_group(self) -> None:
+        tool = self.current
+        if tool is None:
+            return
+
+        async def done(group: str | None) -> None:
+            if group is None:
+                return
+            code, msg = captured(lh.cmd_group, tool.name, group or None, lh.TOOLS_DIR, lh.REGISTRY, lh.GROUPS)
+            self.notify(msg, severity="information" if code == 0 else "error")
+            await self.select_tool(tool.name)
+        self.push_screen(GroupScreen(tool, self.group_names()), done)
+
+    async def select_tool(self, name: str | None) -> None:
         """Перечитати тули, скинути пошук і виділити тул з цим ім'ям."""
         search = self.query_one("#search", Input)
         with search.prevent(Input.Changed):
             search.value = ""
-        self.current = None
-        await self.reload_tools()
-        lv = self.query_one("#tools", ListView)
-        names = [i.tool_name for i in lv.children if isinstance(i, ToolItem)]
-        if name in names:
-            lv.index = names.index(name)
-            lv.focus()
+        self.tools = lh.discover()
+        self.specs.clear()
+        self.update_info()
+        self.current = None  # щоб форма перебудувалась для нового об'єкта Tool
+        self.fill_tree("", select=name)
+        self.query_one("#tools", Tree).focus()
 
     def action_remove(self) -> None:
         tool = self.current
@@ -519,7 +648,7 @@ class LocalHelperApp(App):
 
         async def done(yes: bool | None) -> None:
             if yes:
-                code, msg = captured(lh.cmd_remove, tool.name)
+                code, msg = captured(lh.cmd_remove, tool.name, lh.TOOLS_DIR, lh.REGISTRY, lh.GROUPS)
                 self.notify(msg, severity="information" if code == 0 else "error")
                 self.current = None
                 await self.reload_tools()

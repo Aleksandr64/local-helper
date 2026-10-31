@@ -12,7 +12,10 @@
     local_helper photos_to_pdf -help      що робить тул і які параметри приймає
     local_helper photos_to_pdf . --sort date
     local_helper remove my_tool           відключити підключений тул (файли не чіпає)
-    local_helper new rename_photos        створити вбудований тул за шаблоном
+    local_helper new rename_photos --group Фото   створити вбудований тул за шаблоном
+    local_helper group photos_to_pdf Фото  покласти тул у групу (ungroup — прибрати)
+    local_helper groups                   групи і тули в них (groups rename/delete)
+    local_helper list Фото                тули однієї групи
     local_helper setup                    створити .venv і встановити залежності
 """
 from __future__ import annotations
@@ -34,7 +37,9 @@ ROOT = Path(__file__).resolve().parent
 TOOLS_DIR = ROOT / "tools"
 VENV_DIR = ROOT / ".venv"
 REGISTRY = ROOT / "registry.json"
-RESERVED = {"list", "info", "new", "setup", "add", "remove", "help", "ui"}
+GROUPS = ROOT / "groups.json"
+NO_GROUP = "Без групи"
+RESERVED = {"list", "info", "new", "setup", "add", "remove", "help", "ui", "group", "ungroup", "groups"}
 HELP_FLAGS = {"-h", "--help", "-help", "help", "?"}
 CLI_MODULES = {"argparse", "click", "typer", "optparse"}
 NAME_RE = re.compile(r"^[a-z][a-z0-9_]*$")
@@ -74,6 +79,7 @@ class Tool:
     doc: str
     source: str = "builtin"  # builtin | added
     missing: bool = False
+    group: str | None = None
 
     @property
     def summary(self) -> str:
@@ -233,7 +239,60 @@ def save_registry(tools: dict[str, dict], registry: Path = REGISTRY) -> None:
     os.replace(tmp, registry)
 
 
-def discover(tools_dir: Path = TOOLS_DIR, registry: Path = REGISTRY) -> dict[str, Tool]:
+def load_groups(groups_file: Path = GROUPS) -> dict[str, str]:
+    """Ім'я тулу -> назва групи."""
+    if not groups_file.is_file():
+        return {}
+    try:
+        data = json.loads(groups_file.read_text(encoding="utf-8")).get("tools", {})
+        return {k: v for k, v in data.items() if isinstance(v, str) and v.strip()}
+    except (json.JSONDecodeError, OSError, AttributeError) as e:
+        print(f"Не вдалося прочитати {groups_file}: {e}", file=sys.stderr)
+        return {}
+
+
+def save_groups(mapping: dict[str, str], groups_file: Path = GROUPS) -> None:
+    tmp = groups_file.with_name(groups_file.name + ".tmp")
+    tmp.write_text(json.dumps({"tools": dict(sorted(mapping.items()))}, ensure_ascii=False, indent=2) + "\n",
+                   encoding="utf-8")
+    os.replace(tmp, groups_file)
+
+
+def clean_group(name: str | None) -> str:
+    return " ".join((name or "").split())
+
+
+def assign_group(tool_name: str, group: str | None, groups_file: Path = GROUPS) -> str | None:
+    """Покласти тул у групу (порожня назва — прибрати з групи). Повертає фактичну назву групи."""
+    mapping = load_groups(groups_file)
+    group = clean_group(group)
+    if group:
+        # «фото» і «Фото» — одна група: беремо вже існуюче написання
+        group = next((g for g in mapping.values() if g.casefold() == group.casefold()), group)
+        mapping[tool_name] = group
+    else:
+        mapping.pop(tool_name, None)
+    save_groups(mapping, groups_file)
+    return group or None
+
+
+def ordered(tools: dict[str, Tool]) -> list[tuple[str, list[Tool]]]:
+    """Тули по групах: групи за алфавітом, «Без групи» — в кінці."""
+    buckets: dict[str, list[Tool]] = {}
+    for t in tools.values():
+        buckets.setdefault(t.group or NO_GROUP, []).append(t)
+    keys = sorted((g for g in buckets if g != NO_GROUP), key=str.casefold)
+    if NO_GROUP in buckets:
+        keys.append(NO_GROUP)
+    return [(g, sorted(buckets[g], key=lambda t: t.name)) for g in keys]
+
+
+def flat(tools: dict[str, Tool]) -> list[Tool]:
+    return [t for _, group in ordered(tools) for t in group]
+
+
+def discover(tools_dir: Path = TOOLS_DIR, registry: Path = REGISTRY,
+             groups_file: Path = GROUPS) -> dict[str, Tool]:
     tools: dict[str, Tool] = {}
     if tools_dir.is_dir():
         for d in sorted(tools_dir.iterdir(), key=lambda p: p.name.lower()):
@@ -249,6 +308,9 @@ def discover(tools_dir: Path = TOOLS_DIR, registry: Path = REGISTRY) -> dict[str
         missing = not entry.is_file()
         doc = rec.get("doc", "") if missing else read_doc(entry)
         tools[name] = Tool(name, entry, doc, source="added", missing=missing)
+    groups = load_groups(groups_file)
+    for t in tools.values():
+        t.group = groups.get(t.name)
     return tools
 
 
@@ -319,15 +381,76 @@ def tags(tool: Tool) -> str:
     return " ".join(out)
 
 
-def cmd_list(tools: dict[str, Tool]) -> int:
+def cmd_list(tools: dict[str, Tool], group: str | None = None) -> int:
     if not tools:
         print("Тулів поки немає. Створи: local_helper new <name> або підключи: local_helper add <шлях>")
         return 0
+    sections = ordered(tools)
+    has_groups = any(g != NO_GROUP for g, _ in sections)
+    if group:
+        wanted = clean_group(group).casefold()
+        sections = [s for s in sections if s[0].casefold() == wanted]
+        if not sections:
+            print(f"Групу «{group}» не знайдено. Групи: {', '.join(g for g, _ in ordered(tools))}",
+                  file=sys.stderr)
+            return 1
     width = max(len(n) for n in tools)
-    for i, t in enumerate(tools.values(), 1):
-        tag = f"  {tags(t)}" if tags(t) else ""
-        print(f"{i:>3}. {t.name:<{width}}  {t.summary}{tag}")
+    i = 0
+    for g, group_tools in sections:
+        if has_groups:
+            if i:
+                print()
+            print(g)
+        for t in group_tools:
+            i += 1
+            tag = f"  {tags(t)}" if tags(t) else ""
+            print(f"{i:>3}. {t.name:<{width}}  {t.summary}{tag}")
     return 0
+
+
+def cmd_group(name: str, group: str | None, tools_dir: Path = TOOLS_DIR, registry: Path = REGISTRY,
+              groups_file: Path = GROUPS) -> int:
+    tool = find_tool(name, discover(tools_dir, registry, groups_file))
+    if tool is None:
+        return 2
+    g = assign_group(tool.name, group, groups_file)
+    print(f"«{tool.name}» → група «{g}»" if g else f"«{tool.name}» прибрано з групи")
+    return 0
+
+
+def cmd_groups(args: list[str], tools: dict[str, Tool], groups_file: Path = GROUPS) -> int:
+    if not args:
+        for g, group_tools in ordered(tools):
+            print(f"{g} ({len(group_tools)}): {', '.join(t.name for t in group_tools)}")
+        print("\nПокласти тул у групу: local_helper group <tool> <група>")
+        return 0
+    action, rest = args[0], args[1:]
+    mapping = load_groups(groups_file)
+    if action == "rename" and len(rest) == 2:
+        old, new = clean_group(rest[0]).casefold(), clean_group(rest[1])
+        hits = [k for k, v in mapping.items() if v.casefold() == old]
+        if not hits or not new:
+            print(f"Групу «{rest[0]}» не знайдено." if not hits else "Нова назва порожня.", file=sys.stderr)
+            return 1
+        for k in hits:
+            mapping[k] = new
+        save_groups(mapping, groups_file)
+        print(f"Групу «{rest[0]}» перейменовано на «{new}» (тулів у ній: {len(hits)}).")
+        return 0
+    if action == "delete" and len(rest) == 1:
+        old = clean_group(rest[0]).casefold()
+        hits = [k for k, v in mapping.items() if v.casefold() == old]
+        if not hits:
+            print(f"Групу «{rest[0]}» не знайдено.", file=sys.stderr)
+            return 1
+        for k in hits:
+            del mapping[k]
+        save_groups(mapping, groups_file)
+        print(f"Групу «{rest[0]}» видалено; тули ({', '.join(hits)}) тепер без групи. Самі тули не змінено.")
+        return 0
+    print("Використання: local_helper groups | groups rename <стара> <нова> | groups delete <група>",
+          file=sys.stderr)
+    return 2
 
 
 def cmd_help(tool: Tool) -> int:
@@ -370,7 +493,8 @@ def find_entry(folder: Path) -> tuple[Path | None, str]:
 
 
 def cmd_add(path: str, name: str | None = None, entry: str | None = None,
-            tools_dir: Path = TOOLS_DIR, registry: Path = REGISTRY) -> int:
+            tools_dir: Path = TOOLS_DIR, registry: Path = REGISTRY,
+            group: str | None = None, groups_file: Path = GROUPS) -> int:
     p = Path(path).expanduser().resolve()
     if not p.exists():
         print(f"Шлях не знайдено: {p}", file=sys.stderr)
@@ -398,7 +522,7 @@ def cmd_add(path: str, name: str | None = None, entry: str | None = None,
     if err:
         print(f"{err}\nВкажи інше ім'я: local_helper add \"{path}\" --name <ім'я>", file=sys.stderr)
         return 2
-    tools = discover(tools_dir, registry)
+    tools = discover(tools_dir, registry, groups_file)
     if name in tools:
         t = tools[name]
         hint = f"local_helper remove {name}" if t.source == "added" else "інше ім'я"
@@ -412,19 +536,24 @@ def cmd_add(path: str, name: str | None = None, entry: str | None = None,
     save_registry(reg, registry)
     print(f"Додано тул «{name}»: {entry_path}")
     print(f"Опис: {Tool(name, entry_path, doc).summary}")
+    if clean_group(group):
+        print(f"Група: {assign_group(name, group, groups_file)}")
     print(f"Довідка: local_helper {name} -help")
     return 0
 
 
-def cmd_remove(name: str, tools_dir: Path = TOOLS_DIR, registry: Path = REGISTRY) -> int:
+def cmd_remove(name: str, tools_dir: Path = TOOLS_DIR, registry: Path = REGISTRY,
+               groups_file: Path = GROUPS) -> int:
     key = normalize(name)
     reg = load_registry(registry)
     if key in reg:
         rec = reg.pop(key)
         save_registry(reg, registry)
+        if key in load_groups(groups_file):
+            assign_group(key, None, groups_file)
         print(f"Тул «{key}» відключено (файли в {rec.get('path')} не змінено).")
         return 0
-    tools = discover(tools_dir, registry)
+    tools = discover(tools_dir, registry, groups_file)
     if key in tools:
         print(f"«{key}» — вбудований тул ({tools[key].path.parent}). "
               "Щоб прибрати його, видали цю папку.", file=sys.stderr)
@@ -433,7 +562,8 @@ def cmd_remove(name: str, tools_dir: Path = TOOLS_DIR, registry: Path = REGISTRY
     return 2
 
 
-def cmd_new(name: str, tools_dir: Path = TOOLS_DIR, description: str | None = None) -> int:
+def cmd_new(name: str, tools_dir: Path = TOOLS_DIR, description: str | None = None,
+            group: str | None = None, groups_file: Path = GROUPS) -> int:
     name = normalize(name)
     err = name_error(name)
     if err:
@@ -449,6 +579,8 @@ def cmd_new(name: str, tools_dir: Path = TOOLS_DIR, description: str | None = No
     description = description or "TODO: короткий опис тулу."
     main_py.write_text(TEMPLATE.format(name=name, description=description), encoding="utf-8")
     print(f"Створено {main_py}")
+    if clean_group(group):
+        print(f"Група: {assign_group(name, group, groups_file)}")
     print(f"Допиши опис і логіку, потім перевір: local_helper {name} -help")
     return 0
 
@@ -478,7 +610,7 @@ def cmd_setup(tools: dict[str, Tool]) -> int:
 def menu(tools: dict[str, Tool]) -> int:
     if not tools:
         return cmd_list(tools)
-    names = list(tools)
+    names = [t.name for t in flat(tools)]  # той самий порядок, що й у cmd_list
     while True:
         print()
         cmd_list(tools)
@@ -514,6 +646,15 @@ def parse_add(args: list[str]) -> argparse.Namespace:
     parser.add_argument("path", help="папка тулу або .py-файл")
     parser.add_argument("--name", help="ім'я команди (за замовчуванням — ім'я папки/файлу)")
     parser.add_argument("--entry", help="головний .py-файл у папці, якщо їх кілька")
+    parser.add_argument("--group", help="група, в яку покласти тул")
+    return parser.parse_args(args)
+
+
+def parse_new(args: list[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(prog="local_helper new", description="Створити вбудований тул за шаблоном.")
+    parser.add_argument("name", help="ім'я команди (латиниця, a-z 0-9 _)")
+    parser.add_argument("--description", help="короткий опис (перший рядок docstring)")
+    parser.add_argument("--group", help="група, в яку покласти тул")
     return parser.parse_args(args)
 
 
@@ -537,18 +678,29 @@ def main(argv: list[str] | None = None) -> int:
         print(__doc__)
         return 0
     if head == "list":
-        return cmd_list(tools)
+        return cmd_list(tools, " ".join(rest) or None)
     if head == "setup":
         return cmd_setup(tools)
     if head == "add":
         a = parse_add(rest)
-        return cmd_add(a.path, a.name, a.entry)
-    if head in {"info", "help", "new", "remove"}:
+        return cmd_add(a.path, a.name, a.entry, group=a.group)
+    if head == "new":
+        a = parse_new(rest)
+        return cmd_new(a.name, description=a.description, group=a.group)
+    if head == "groups":
+        return cmd_groups(rest, tools)
+    if head == "group":
+        if len(rest) < 2:
+            print("Використання: local_helper group <tool> <група>   (прибрати: local_helper ungroup <tool>)",
+                  file=sys.stderr)
+            return 2
+        return cmd_group(rest[0], " ".join(rest[1:]))
+    if head in {"info", "help", "remove", "ungroup"}:
         if len(rest) != 1:
             print(f"Використання: local_helper {head} <name>", file=sys.stderr)
             return 2
-        if head == "new":
-            return cmd_new(rest[0])
+        if head == "ungroup":
+            return cmd_group(rest[0], None)
         if head == "remove":
             return cmd_remove(rest[0])
         tool = find_tool(rest[0], tools)

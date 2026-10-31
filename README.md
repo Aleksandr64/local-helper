@@ -21,6 +21,7 @@ lh photos_to_pdf -help      # що робить тул і які парамет�
 lh photos_to_pdf "D:\Scans\Паспорт" --dry-run
 lh new rename_photos        # створити новий тул
 lh add "D:\Scripts\my_tool" # підключити тул з іншої папки
+lh group photos_to_pdf Фото # покласти тул у групу (lh groups — усі групи)
 ```
 
 ## Тули

@@ -25,6 +25,7 @@ class TempDirTest(unittest.TestCase):
         self.tools = self.base / "tools"
         self.tools.mkdir()
         self.registry = self.base / "registry.json"
+        self.groups = self.base / "groups.json"
 
     def tearDown(self):
         self._tmp.cleanup()
@@ -35,10 +36,11 @@ class TempDirTest(unittest.TestCase):
         return path
 
     def discover(self):
-        return lh.discover(self.tools, self.registry)
+        return lh.discover(self.tools, self.registry, self.groups)
 
-    def add(self, path, name=None, entry=None):
-        return quiet(lh.cmd_add, str(path), name, entry, tools_dir=self.tools, registry=self.registry)
+    def add(self, path, name=None, entry=None, group=None):
+        return quiet(lh.cmd_add, str(path), name, entry, tools_dir=self.tools, registry=self.registry,
+                     group=group, groups_file=self.groups)
 
 
 class DiscoverTest(TempDirTest):
@@ -135,11 +137,11 @@ class AddRemoveTest(TempDirTest):
     def test_remove(self):
         self.write(self.base / "ext" / "main.py")
         self.add(self.base / "ext")
-        self.assertEqual(quiet(lh.cmd_remove, "ext", self.tools, self.registry)[0], 0)
+        self.assertEqual(quiet(lh.cmd_remove, "ext", self.tools, self.registry, self.groups)[0], 0)
         self.assertNotIn("ext", self.discover())
         self.assertTrue((self.base / "ext" / "main.py").exists())
         self.write(self.tools / "builtin_one" / "main.py")
-        self.assertEqual(quiet(lh.cmd_remove, "builtin_one", self.tools, self.registry)[0], 1)
+        self.assertEqual(quiet(lh.cmd_remove, "builtin_one", self.tools, self.registry, self.groups)[0], 1)
 
     def test_moved_tool_is_marked_missing(self):
         main_py = self.write(self.base / "gone" / "main.py")
@@ -149,6 +151,59 @@ class AddRemoveTest(TempDirTest):
         self.assertTrue(tool.missing)
         self.assertEqual(tool.summary, "Опис тулу.")  # опис збережено в реєстрі
         self.assertEqual(quiet(lh.run_tool, tool, [])[0], 1)
+
+
+class GroupsTest(TempDirTest):
+    def setUp(self):
+        super().setUp()
+        for name in ("alpha", "beta", "gamma"):
+            self.write(self.tools / name / "main.py")
+
+    def group(self, name, group):
+        return quiet(lh.cmd_group, name, group, self.tools, self.registry, self.groups)
+
+    def test_assign_ungroup_and_case_insensitive_reuse(self):
+        self.assertEqual(self.group("alpha", " Фото  документи ")[0], 0)
+        self.assertEqual(self.group("beta", "фото документи")[0], 0)  # та сама група
+        found = self.discover()
+        self.assertEqual(found["alpha"].group, "Фото документи")
+        self.assertEqual(found["beta"].group, "Фото документи")
+        self.assertIsNone(found["gamma"].group)
+        self.assertEqual(self.group("alpha", None)[0], 0)
+        self.assertIsNone(self.discover()["alpha"].group)
+        self.assertEqual(self.group("nope", "X")[0], 2)
+
+    def test_ordered_and_list_output(self):
+        self.group("gamma", "Б-група")
+        self.group("alpha", "А-група")
+        sections = lh.ordered(self.discover())
+        self.assertEqual([(g, [t.name for t in ts]) for g, ts in sections],
+                         [("А-група", ["alpha"]), ("Б-група", ["gamma"]), (lh.NO_GROUP, ["beta"])])
+        code, out, _ = quiet(lh.cmd_list, self.discover())
+        self.assertLess(out.index("А-група"), out.index("alpha"))
+        self.assertLess(out.index(lh.NO_GROUP), out.index("beta"))
+        code, out, _ = quiet(lh.cmd_list, self.discover(), "б-група")
+        self.assertIn("gamma", out)
+        self.assertNotIn("alpha", out)
+        self.assertEqual(quiet(lh.cmd_list, self.discover(), "нема")[0], 1)
+
+    def test_groups_rename_and_delete(self):
+        self.group("alpha", "Old")
+        self.group("beta", "Old")
+        self.assertEqual(quiet(lh.cmd_groups, ["rename", "old", "New"], self.discover(), self.groups)[0], 0)
+        self.assertEqual({t.group for t in self.discover().values()}, {"New", None})
+        self.assertEqual(quiet(lh.cmd_groups, ["delete", "New"], self.discover(), self.groups)[0], 0)
+        self.assertEqual({t.group for t in self.discover().values()}, {None})
+        self.assertEqual(quiet(lh.cmd_groups, ["delete", "New"], self.discover(), self.groups)[0], 1)
+
+    def test_new_and_add_with_group_and_remove_cleans_up(self):
+        quiet(lh.cmd_new, "fresh", self.tools, None, "Нове", self.groups)
+        self.assertEqual(self.discover()["fresh"].group, "Нове")
+        self.write(self.base / "ext" / "main.py")
+        self.assertEqual(self.add(self.base / "ext", group="Зовнішні")[0], 0)
+        self.assertEqual(self.discover()["ext"].group, "Зовнішні")
+        quiet(lh.cmd_remove, "ext", self.tools, self.registry, self.groups)
+        self.assertNotIn("ext", lh.load_groups(self.groups))
 
 
 class HelpTest(TempDirTest):
