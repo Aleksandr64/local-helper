@@ -39,7 +39,7 @@
 
 ```powershell
 # 1. Клонувати репозиторій
-git clone https://github.com/Aleksandr64/Diferrent-Tools.git "D:\Dev\Diferrent Tools"
+git clone https://github.com/Aleksandr64/local-helper.git "D:\Dev\Diferrent Tools"
 
 # 2. Створити .venv і встановити залежності
 python "D:\Dev\Diferrent Tools\local_helper.py" setup
@@ -209,7 +209,7 @@ lh add "D:\Scripts\video_compress" --group Відео
 ## 📁 Структура
 
 ```
-Diferrent-Tools/
+local-helper/
 ├── local_helper.py        # лаунчер і всі команди (лише стандартна бібліотека)
 ├── local_helper_tui.py    # інтерфейс у терміналі (Textual)
 ├── lh.cmd, local_helper.cmd
