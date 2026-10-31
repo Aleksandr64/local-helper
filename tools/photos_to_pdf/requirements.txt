@@ -1,0 +1,3 @@
+Pillow
+img2pdf
+pillow-heif

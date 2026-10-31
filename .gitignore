@@ -1,0 +1,15 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Підключені командою `lh add` тули — шляхи прив'язані до цього ПК
+registry.json
+registry.json.tmp
+
+# Локальні налаштування Claude Code
+.claude/settings.local.json
+
+# Тимчасові файли тулів
+*.part

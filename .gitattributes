@@ -1,0 +1,4 @@
+* text=auto
+# Windows-скрипти мають бути з CRLF, інакше cmd/PowerShell можуть їх зламати
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
