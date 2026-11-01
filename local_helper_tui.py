@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import io
+import locale
 import os
 import subprocess
 from contextlib import redirect_stderr, redirect_stdout
@@ -32,6 +33,23 @@ def captured(fn, *args) -> tuple[int, str]:
     return code, out.getvalue().strip()
 
 
+def decode(chunk: bytes) -> str:
+    """UTF-8, а якщо не вийшло — кодування консолі (так пише .ps1 без [Console]::OutputEncoding)."""
+    try:
+        return chunk.decode("utf-8")
+    except UnicodeDecodeError:
+        pass
+    enc = locale.getpreferredencoding(False)
+    if os.name == "nt":
+        import ctypes
+        cp = ctypes.windll.kernel32.GetConsoleOutputCP() or ctypes.windll.kernel32.GetOEMCP()
+        enc = f"cp{cp}"
+    try:
+        return chunk.decode(enc, errors="replace")
+    except LookupError:
+        return chunk.decode("utf-8", errors="replace")
+
+
 def is_required(spec: dict) -> bool:
     if spec["options"]:
         return spec["required"]
@@ -40,6 +58,8 @@ def is_required(spec: dict) -> bool:
 
 def tool_label(tool: lh.Tool) -> Text:
     label = Text(tool.name, style="bold")
+    if tool.kind != "py":
+        label.append(f"  {tool.kind}", style="magenta")
     if tool.source == "added":
         label.append("  added", style="italic cyan")
     if tool.missing:
@@ -107,6 +127,9 @@ class NewToolScreen(ModalScreen[dict | None]):
             yield Input(placeholder="rename_photos", id="new-name")
             yield Label("Короткий опис (перший рядок у списку)")
             yield Input(placeholder="Перейменовує фото за датою зйомки", id="new-desc")
+            yield Label("Мова")
+            yield Select([(f"{label} (.{kind})", kind) for kind, label in lh.KIND_LABELS.items()],
+                         value="py", allow_blank=False, id="new-lang")
             yield Label("Група (необов'язково)")
             yield group_input(self.groups, self.group, input_id="new-group")
             with Horizontal(classes="buttons"):
@@ -125,7 +148,8 @@ class NewToolScreen(ModalScreen[dict | None]):
             self.notify(err, severity="error", markup=False)
             return
         self.dismiss({"name": name, "description": self.query_one("#new-desc", Input).value.strip(),
-                      "group": self.query_one("#new-group", Input).value.strip() or None})
+                      "group": self.query_one("#new-group", Input).value.strip() or None,
+                      "lang": self.query_one("#new-lang", Select).value})
 
     @on(Button.Pressed, "#new-cancel")
     def cancel(self) -> None:
@@ -185,19 +209,28 @@ class ConfirmScreen(ModalScreen[bool]):
 
 
 class WorkdirScreen(ModalScreen[str | None]):
+    """Повертає абсолютний шлях папки, "" — прибрати (лише для тулу), None — скасовано."""
     BINDINGS = [Binding("escape", "dismiss(None)", "Скасувати")]
 
-    def __init__(self, current: Path) -> None:
+    def __init__(self, current: Path, heading: str = "", clearable: bool = False) -> None:
         super().__init__()
         self.current = current
+        self.heading = heading or "Робоча папка (від неї рахуються відносні шляхи)"
+        self.clearable = clearable
 
     def compose(self) -> ComposeResult:
         with Vertical(classes="dialog"):
-            yield Static(Text("Робоча папка (від неї рахуються відносні шляхи)", style="bold"))
+            yield Static(Text(self.heading, style="bold"))
             yield Input(value=str(self.current), id="wd-path")
             with Horizontal(classes="buttons"):
                 yield Button("OK", variant="primary", id="wd-ok")
+                if self.clearable:
+                    yield Button("Прибрати", id="wd-clear")
                 yield Button("Скасувати", id="wd-cancel")
+
+    @on(Button.Pressed, "#wd-clear")
+    def clear(self) -> None:
+        self.dismiss("")
 
     @on(Button.Pressed, "#wd-ok")
     @on(Input.Submitted)
@@ -249,6 +282,7 @@ class LocalHelperApp(App):
         Binding("ctrl+s", "stop", "Стоп", priority=True),
         Binding("slash", "search", "Пошук"),
         Binding("ctrl+w", "workdir", "Папка", priority=True),
+        Binding("w", "tool_workdir", "Папка тулу"),
         Binding("n", "new", "Новий"),
         Binding("g", "group", "Група"),
         Binding("a", "add", "Додати"),
@@ -413,8 +447,13 @@ class LocalHelperApp(App):
             self.update_preview()
             return
         t = Text(tool.name, style="bold " + ("red" if tool.missing else "cyan"))
-        t.append(f"  ·  {'підключений' if tool.source == 'added' else 'вбудований'}  ·  ", style="dim")
-        t.append(str(tool.path), style="dim")
+        t.append(f"  ·  {'підключений' if tool.source == 'added' else 'вбудований'}", style="dim")
+        if tool.kind != "py":
+            t.append(f"  ·  {lh.KIND_LABELS[tool.kind]}", style="magenta")
+        t.append(f"  ·  {tool.path}", style="dim")
+        if tool.workdir is not None:
+            t.append("\nзапускається в: ", style="dim")
+            t.append(str(tool.workdir), style="yellow" if tool.workdir.is_dir() else "red")
         title.update(t)
         doc.update(Text(tool.doc or "(без опису — додай docstring на початок файлу)"))
         extra = self.query_one("#extra", Input)
@@ -443,9 +482,13 @@ class LocalHelperApp(App):
         if tool.missing:
             await form.mount(Static(Text("Файл тулу зник. Відключи його (d) і підключи знову з новим шляхом.",
                                          style="red")))
+        elif tool.kind == "sh":
+            await form.mount(Static(Text("Bash-скрипт: форми немає, введи аргументи рядком нижче.", style="dim")))
         elif not specs:
-            await form.mount(Static(Text("Форма недоступна: тул не використовує argparse або не має параметрів. "
-                                         "Введи аргументи рядком нижче.", style="dim")))
+            reason = ("PowerShell не знайдено або в скрипта немає param()" if tool.kind == "ps1"
+                      else "тул не використовує argparse або не має параметрів")
+            await form.mount(Static(Text(f"Форма недоступна: {reason}. Введи аргументи рядком нижче.",
+                                         style="dim")))
         else:
             values = self.values.setdefault(tool.name, {})
             await form.mount_all(self.field_row(s, values.get(s["dest"])) for s in specs)
@@ -532,15 +575,22 @@ class LocalHelperApp(App):
     async def run_tool(self, tool: lh.Tool, argv: list[str]) -> None:
         log = self.query_one("#log", RichLog)
         log.clear()
-        log.write(Text(f"▶ lh {tool.name} {subprocess.list2cmdline(argv)}   (у {self.workdir})", style="bold"))
+        cwd = tool.workdir or self.workdir
+        log.write(Text(f"▶ lh {tool.name} {subprocess.list2cmdline(argv)}   (у {cwd})", style="bold"))
+        err = lh.launch_error(tool)
+        if err:
+            log.write(Text(err, style="red"))
+            self.set_outhead(f"Вивід · {tool.name} · не запущено", "bold red")
+            self.notify(err.splitlines()[0], severity="error")
+            return
         self.set_outhead(f"Вивід · {tool.name} · виконується…", "bold yellow")
         self.query_one("#stop", Button).disabled = False
         self.query_one("#run", Button).disabled = True
         try:
             self.proc = await asyncio.create_subprocess_exec(
-                lh.python_exe(tool), str(tool.path), *argv, cwd=str(self.workdir),
+                *lh.tool_command(tool), *argv, cwd=str(cwd),
                 stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE, env={**os.environ, "PYTHONUTF8": "1", "PYTHONUNBUFFERED": "1"})
+                stderr=asyncio.subprocess.PIPE, env={**lh.tool_env(), "PYTHONUNBUFFERED": "1"})
             await asyncio.gather(self.pump(self.proc.stdout, log, ""),
                                  self.pump(self.proc.stderr, log, "red"))
             code = await self.proc.wait()
@@ -561,7 +611,7 @@ class LocalHelperApp(App):
         """Потоковий вивід; '\\r' (прогрес) теж вважається кінцем рядка."""
         buf = ""
         while chunk := await stream.read(4096):
-            buf += chunk.decode("utf-8", errors="replace")
+            buf += decode(chunk)
             *lines, buf = buf.replace("\r\n", "\n").replace("\r", "\n").split("\n")
             for line in lines:
                 if line.strip():
@@ -593,7 +643,7 @@ class LocalHelperApp(App):
                 return
             before = set(self.tools)
             code, msg = captured(lh.cmd_add, result["path"], result["name"], result["entry"],
-                                 lh.TOOLS_DIR, lh.REGISTRY, result["group"], lh.GROUPS)
+                                 lh.TOOLS_DIR, lh.REGISTRY, result["group"], lh.GROUPS, None, lh.WORKDIRS)
             self.notify(msg or "Готово", severity="information" if code == 0 else "error", timeout=8)
             if code == 0:
                 new = sorted(set(lh.discover()) - before)
@@ -605,7 +655,7 @@ class LocalHelperApp(App):
             if not result:
                 return
             code, msg = captured(lh.cmd_new, result["name"], lh.TOOLS_DIR, result["description"],
-                                 result["group"], lh.GROUPS)
+                                 result["group"], lh.GROUPS, result["lang"])
             self.notify(msg, severity="information" if code == 0 else "error", timeout=10)
             if code == 0:
                 await self.select_tool(result["name"])
@@ -620,10 +670,26 @@ class LocalHelperApp(App):
         async def done(group: str | None) -> None:
             if group is None:
                 return
-            code, msg = captured(lh.cmd_group, tool.name, group or None, lh.TOOLS_DIR, lh.REGISTRY, lh.GROUPS)
+            code, msg = captured(lh.cmd_group, tool.name, group or None, lh.TOOLS_DIR, lh.REGISTRY, lh.GROUPS,
+                                 lh.WORKDIRS)
             self.notify(msg, severity="information" if code == 0 else "error")
             await self.select_tool(tool.name)
         self.push_screen(GroupScreen(tool, self.group_names()), done)
+
+    def action_tool_workdir(self) -> None:
+        tool = self.current
+        if tool is None:
+            return
+
+        async def done(path: str | None) -> None:
+            if path is None:
+                return
+            code, msg = captured(lh.cmd_workdir, tool.name, path or None, not path, lh.TOOLS_DIR,
+                                 lh.REGISTRY, lh.GROUPS, lh.WORKDIRS)
+            self.notify(msg, severity="information" if code == 0 else "error")
+            await self.select_tool(tool.name)
+        self.push_screen(WorkdirScreen(tool.workdir or self.workdir, f"Папка, в якій завжди запускати «{tool.name}»",
+                                       clearable=tool.workdir is not None), done)
 
     async def select_tool(self, name: str | None) -> None:
         """Перечитати тули, скинути пошук і виділити тул з цим ім'ям."""
@@ -648,7 +714,8 @@ class LocalHelperApp(App):
 
         async def done(yes: bool | None) -> None:
             if yes:
-                code, msg = captured(lh.cmd_remove, tool.name, lh.TOOLS_DIR, lh.REGISTRY, lh.GROUPS)
+                code, msg = captured(lh.cmd_remove, tool.name, lh.TOOLS_DIR, lh.REGISTRY, lh.GROUPS,
+                                     lh.WORKDIRS)
                 self.notify(msg, severity="information" if code == 0 else "error")
                 self.current = None
                 await self.reload_tools()

@@ -9,16 +9,17 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 try:
     import local_helper_tui as ui
-    from textual.widgets import Checkbox, Input, RichLog, Tree
+    from textual.widgets import Checkbox, Input, RichLog, Select, Tree
 except ImportError:
     ui = None
 
 
 @contextmanager
 def sandbox(tmp: Path):
-    """Підміняє tools/, registry.json і groups.json на тимчасові, з копією вбудованих тулів."""
+    """Підміняє tools/ і json-файли лаунчера на тимчасові, з копією вбудованих тулів."""
     lh = ui.lh
     tools, registry, groups = tmp / "tools", tmp / "registry.json", tmp / "groups.json"
+    workdirs = tmp / "workdirs.json"
     tools.mkdir()
     for name in ("count_lines", "photos_to_pdf"):
         (tools / name).mkdir()
@@ -26,10 +27,11 @@ def sandbox(tmp: Path):
     original = lh.discover
 
     def discover(*args):  # TUI викликає discover() без аргументів — тоді беремо тимчасові шляхи
-        return original(*args) if args else original(tools, registry, groups)
+        return original(*args) if args else original(tools, registry, groups, workdirs)
 
     with mock.patch.object(lh, "TOOLS_DIR", tools), mock.patch.object(lh, "REGISTRY", registry), \
-            mock.patch.object(lh, "GROUPS", groups), mock.patch.object(lh, "discover", discover):
+            mock.patch.object(lh, "GROUPS", groups), mock.patch.object(lh, "WORKDIRS", workdirs), \
+            mock.patch.object(lh, "discover", discover):
         yield tools, groups
 
 
@@ -138,6 +140,55 @@ class TuiSmokeTest(unittest.IsolatedAsyncioTestCase):
                 self.assertTrue(await self.wait_for(
                     pilot, lambda: app.current is not None and app.current.group is None))
                 self.assertTrue(all(n.data[0] == "tool" for n in tree.root.children))
+
+    async def test_tool_workdir_dialog_and_run_uses_it(self):
+        with sandbox(self.tmp):
+            fixed = self.tmp / "фіксована папка"
+            fixed.mkdir()
+            (fixed / "b.md").write_text("x\n", encoding="utf-8")
+            app = ui.LocalHelperApp(workdir=self.tmp)
+            async with app.run_test(size=(140, 44)) as pilot:
+                await pilot.pause(0.3)
+                self.assertEqual(app.current.name, "count_lines")
+                await pilot.press("w")
+                await pilot.pause(0.2)
+                self.assertIsInstance(app.screen, ui.WorkdirScreen)
+                app.screen.query_one("#wd-path", Input).value = str(fixed)
+                await pilot.press("enter")
+                self.assertTrue(await self.wait_for(
+                    pilot, lambda: app.current is not None and app.current.workdir == fixed.resolve()))
+                self.assertIn("фіксована папка", (self.tmp / "workdirs.json").read_text(encoding="utf-8"))
+
+                self.assertTrue(await self.wait_for(pilot, lambda: app.query("#f-ext")))
+                await pilot.press("ctrl+r")
+                log = app.query_one("#log", RichLog)
+                self.assertTrue(await self.wait_for(
+                    pilot, lambda: app.proc is None and any("Разом" in str(l.text) for l in log.lines)))
+                text = "\n".join(str(l.text) for l in log.lines)
+                self.assertIn("фіксована", text)  # рядок запуску показує закріплену папку
+                self.assertIn(".md", text)  # рахував файли закріпленої папки, а не робочої
+                self.assertNotIn(".txt", text)
+
+                await pilot.press("w")
+                await pilot.pause(0.2)
+                await pilot.click("#wd-clear")
+                self.assertTrue(await self.wait_for(
+                    pilot, lambda: app.current is not None and app.current.workdir is None))
+
+    async def test_new_tool_dialog_language(self):
+        with sandbox(self.tmp) as (tools, groups):
+            app = ui.LocalHelperApp(workdir=self.tmp)
+            async with app.run_test(size=(140, 44)) as pilot:
+                await pilot.pause(0.3)
+                await pilot.press("n")
+                await pilot.pause(0.2)
+                app.screen.query_one("#new-name", Input).value = "ps_tool"
+                app.screen.query_one("#new-lang", Select).value = "ps1"
+                await pilot.click("#new-ok")
+                self.assertTrue(await self.wait_for(
+                    pilot, lambda: app.current is not None and app.current.name == "ps_tool"))
+                self.assertEqual(app.current.kind, "ps1")
+                self.assertTrue((tools / "ps_tool" / "main.ps1").is_file())
 
 
 if __name__ == "__main__":

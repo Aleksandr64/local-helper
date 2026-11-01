@@ -8,6 +8,10 @@ venv/
 registry.json
 registry.json.tmp
 
+# Закріплені командою `lh workdir` папки тулів — теж шляхи цього ПК
+workdirs.json
+workdirs.json.tmp
+
 # Локальні налаштування Claude Code
 .claude/settings.local.json
 

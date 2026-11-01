@@ -5,6 +5,7 @@ import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import local_helper as lh  # noqa: E402
@@ -26,6 +27,7 @@ class TempDirTest(unittest.TestCase):
         self.tools.mkdir()
         self.registry = self.base / "registry.json"
         self.groups = self.base / "groups.json"
+        self.workdirs = self.base / "workdirs.json"
 
     def tearDown(self):
         self._tmp.cleanup()
@@ -36,7 +38,7 @@ class TempDirTest(unittest.TestCase):
         return path
 
     def discover(self):
-        return lh.discover(self.tools, self.registry, self.groups)
+        return lh.discover(self.tools, self.registry, self.groups, self.workdirs)
 
     def add(self, path, name=None, entry=None, group=None):
         return quiet(lh.cmd_add, str(path), name, entry, tools_dir=self.tools, registry=self.registry,
@@ -270,6 +272,196 @@ class DescribeArgsTest(TempDirTest):
                          [r"D:\My Files", "--dry-run", "--ext", ".py", ".md",
                           "--tag", "x", "--tag", "y", "--force"])
         self.assertEqual(lh.build_argv(specs, {"mode": "b", "dry_run": False}), ["--mode", "b"])
+
+
+PS1_TOOL = '''#Requires -Version 5.1
+<#
+.SYNOPSIS
+    Робить резервну копію.
+
+.DESCRIPTION
+    Копіює папку в архів.
+
+.PARAMETER Source
+    що копіювати
+
+.PARAMETER Mode
+    режим копіювання
+
+.EXAMPLE
+    local_helper backup -Source D:\\Data
+#>
+param(
+    [Parameter(Mandatory)][string]$Source,
+    [ValidateSet("full", "diff")][string]$Mode = "full",
+    [int]$Keep = 3,
+    [switch]$DryRun
+)
+New-Item -ItemType File -Path "{marker}" | Out-Null
+'''
+
+SH_TOOL = '''#!/usr/bin/env bash
+# Друкує аргументи і поточну папку.
+#
+# Приклад:
+#   local_helper echo_args a b
+set -eu
+printf '%s\\n' "$@"
+pwd
+'''
+
+
+class ScriptKindsTest(TempDirTest):
+    def test_discovers_ps1_and_sh_builtins(self):
+        self.write(self.tools / "backup" / "main.ps1", PS1_TOOL)
+        self.write(self.tools / "echo_args" / "main.sh", SH_TOOL)
+        found = self.discover()
+        self.assertEqual(found["backup"].kind, "ps1")
+        self.assertEqual(found["backup"].summary, "Робить резервну копію.")
+        self.assertIn("Копіює папку в архів.", found["backup"].doc)
+        self.assertIn("local_helper backup -Source", found["backup"].doc)
+        self.assertNotIn("що копіювати", found["backup"].doc)  # .PARAMETER — лише в довідці параметрів
+        self.assertEqual(found["echo_args"].kind, "sh")
+        self.assertEqual(found["echo_args"].summary, "Друкує аргументи і поточну папку.")
+        self.assertIn("local_helper echo_args a b", found["echo_args"].doc)
+
+    def test_ps1_help_params_and_plain_comment_fallback(self):
+        path = self.write(self.base / "b.ps1", PS1_TOOL)
+        self.assertEqual(lh.ps1_help(path)[1], {"source": "що копіювати", "mode": "режим копіювання"})
+        plain = self.write(self.base / "plain.ps1", "# Простий опис.\n# Ще рядок.\nWrite-Output 1\n")
+        self.assertEqual(lh.read_doc(plain), "Простий опис.\nЩе рядок.")
+
+    def test_add_script_files_and_folder(self):
+        ps1 = self.write(self.base / "ext" / "Clean Up.ps1", PS1_TOOL)
+        self.assertEqual(self.add(ps1)[0], 0)
+        self.assertEqual(self.discover()["clean_up"].kind, "ps1")
+        self.write(self.base / "shdir" / "run.sh", SH_TOOL)
+        self.assertEqual(self.add(self.base / "shdir")[0], 0)
+        self.assertEqual(self.discover()["shdir"].path.name, "run.sh")
+        bad = self.write(self.base / "x.bat", "echo 1\n")
+        code, _, err = self.add(bad)
+        self.assertEqual(code, 1)
+        self.assertIn("Непідтримуваний", err)
+
+    def test_find_entry_lists_all_script_kinds(self):
+        self.write(self.base / "m" / "a.py")
+        self.write(self.base / "m" / "b.sh", SH_TOOL)
+        entry, err = lh.find_entry(self.base / "m")
+        self.assertIsNone(entry)
+        self.assertIn("a.py, b.sh", err)
+
+    def test_tool_command_per_kind(self):
+        py = lh.Tool("p", self.base / "p.py", "")
+        ps = lh.Tool("s", self.base / "s.ps1", "")
+        sh = lh.Tool("b", self.base / "d" / "b.sh", "")
+        with mock.patch.object(lh, "find_pwsh", return_value="pwsh"), \
+                mock.patch.object(lh, "find_bash", return_value="bash"):
+            self.assertEqual(lh.tool_command(py)[1], str(py.path))
+            self.assertEqual(lh.tool_command(ps), ["pwsh", "-NoProfile", "-ExecutionPolicy", "Bypass",
+                                                   "-File", str(ps.path)])
+            self.assertEqual(lh.tool_command(sh), ["bash", sh.path.as_posix()])
+        self.write(sh.path, SH_TOOL)
+        with mock.patch.object(lh, "find_bash", return_value=None):
+            self.assertIsNone(lh.tool_command(sh))
+            code, _, err = quiet(lh.run_tool, sh, [])
+        self.assertEqual(code, 1)
+        self.assertIn("Git Bash", err)
+
+    def test_new_with_lang(self):
+        self.assertEqual(quiet(lh.cmd_new, "ps_tool", self.tools, "Опис PS", lang="ps1")[0], 0)
+        self.assertEqual(quiet(lh.cmd_new, "sh_tool", self.tools, "Опис SH", lang="sh")[0], 0)
+        self.assertEqual(quiet(lh.cmd_new, "bad_lang", self.tools, lang="cmd")[0], 2)
+        found = self.discover()
+        self.assertEqual((found["ps_tool"].kind, found["ps_tool"].summary), ("ps1", "Опис PS"))
+        self.assertEqual((found["sh_tool"].kind, found["sh_tool"].summary), ("sh", "Опис SH"))
+        self.assertTrue((self.tools / "ps_tool" / "main.ps1").read_bytes().startswith(b"\xef\xbb\xbf"))
+        self.assertNotIn(b"\r", (self.tools / "sh_tool" / "main.sh").read_bytes())
+
+    @unittest.skipUnless(lh.find_pwsh(), "PowerShell не знайдено")
+    def test_describe_ps1_args_without_running(self):
+        marker = self.base / "ran.txt"
+        path = self.write(self.base / "b" / "main.ps1", PS1_TOOL.replace("{marker}", str(marker)))
+        specs = {s["dest"]: s for s in lh.describe_args(lh.Tool("b", path, ""))}
+        self.assertEqual(list(specs), ["Source", "Mode", "Keep", "DryRun"])
+        self.assertTrue(specs["Source"]["required"])
+        self.assertEqual(specs["Source"]["help"], "що копіювати")
+        self.assertEqual(specs["Mode"]["choices"], ["full", "diff"])
+        self.assertEqual(specs["Mode"]["default"], "full")
+        self.assertEqual(specs["Keep"]["default"], "3")
+        self.assertEqual(specs["DryRun"]["kind"], "store_true")
+        self.assertEqual(lh.build_argv(list(specs.values()), {"Source": r"D:\My Data", "Mode": "diff",
+                                                              "DryRun": True}),
+                         ["-Source", r"D:\My Data", "-Mode", "diff", "-DryRun"])
+        self.assertFalse(marker.exists())
+
+    @unittest.skipUnless(lh.find_pwsh(), "PowerShell не знайдено")
+    def test_run_ps1_with_cyrillic_args(self):
+        out = self.base / "out.txt"
+        path = self.write(self.base / "w" / "main.ps1",
+                          'param([string]$Text)\nSet-Content -LiteralPath "%s" -Value $Text -Encoding utf8\n' % out)
+        tool = lh.Tool("w", path, "")
+        self.assertEqual(quiet(lh.run_tool, tool, ["-Text", "Привіт світ"])[0], 0)
+        self.assertEqual(out.read_text(encoding="utf-8-sig").strip(), "Привіт світ")
+
+    @unittest.skipUnless(lh.find_bash(), "Git Bash не знайдено")
+    def test_run_sh_in_workdir(self):
+        wd = self.base / "папка з пробілом"
+        wd.mkdir()
+        script = SH_TOOL.split("set -eu")[0] + 'set -eu\npwd > out.txt\nprintf "%s" "$1" > arg.txt\n'
+        path = self.write(self.base / "s" / "main.sh", script)
+        tool = lh.Tool("s", path, "", workdir=wd)
+        self.assertEqual(quiet(lh.run_tool, tool, ["Кирилиця й пробіл"])[0], 0)
+        self.assertEqual((wd / "arg.txt").read_text(encoding="utf-8"), "Кирилиця й пробіл")
+        self.assertTrue((wd / "out.txt").is_file())
+
+
+class WorkdirTest(TempDirTest):
+    def workdir(self, *args, **kwargs):
+        return quiet(lh.cmd_workdir, *args, tools_dir=self.tools, registry=self.registry,
+                     groups_file=self.groups, workdirs_file=self.workdirs, **kwargs)
+
+    def test_set_show_clear(self):
+        self.write(self.tools / "alpha" / "main.py")
+        target = self.base / "дані"
+        target.mkdir()
+        self.assertEqual(self.workdir("alpha", str(target))[0], 0)
+        self.assertEqual(self.discover()["alpha"].workdir, target.resolve())
+        code, out, _ = self.workdir("alpha")
+        self.assertEqual((code, out.strip()), (0, str(target.resolve())))
+        self.assertIn("[папка]", quiet(lh.cmd_list, self.discover())[1])
+        self.assertEqual(self.workdir("alpha", clear=True)[0], 0)
+        self.assertIsNone(self.discover()["alpha"].workdir)
+        self.assertEqual(self.workdir("alpha", str(self.base / "nope"))[0], 1)
+        self.assertEqual(self.workdir("nope", str(target))[0], 2)
+
+    def test_run_tool_uses_workdir(self):
+        target = self.base / "робоча папка"
+        target.mkdir()
+        path = self.write(self.tools / "where" / "main.py",
+                          'from pathlib import Path\nPath("cwd.txt").write_text(str(Path.cwd()), encoding="utf-8")\n')
+        self.workdir("where", str(target))
+        self.assertEqual(quiet(lh.run_tool, self.discover()["where"], [])[0], 0)
+        self.assertEqual((target / "cwd.txt").read_text(encoding="utf-8"), str(target.resolve()))
+        self.assertTrue(path.exists())
+
+    def test_missing_workdir_is_reported(self):
+        self.write(self.tools / "alpha" / "main.py")
+        tool = self.discover()["alpha"]
+        tool.workdir = self.base / "gone"
+        code, _, err = quiet(lh.run_tool, tool, [])
+        self.assertEqual(code, 1)
+        self.assertIn("--clear", err)
+
+    def test_add_new_with_workdir_and_remove_clears_it(self):
+        self.write(self.base / "ext" / "main.py")
+        code, _, _ = quiet(lh.cmd_add, str(self.base / "ext"), tools_dir=self.tools, registry=self.registry,
+                           groups_file=self.groups, workdir=str(self.base), workdirs_file=self.workdirs)
+        self.assertEqual(code, 0)
+        self.assertEqual(self.discover()["ext"].workdir, self.base.resolve())
+        quiet(lh.cmd_remove, "ext", self.tools, self.registry, self.groups, self.workdirs)
+        self.assertNotIn("ext", lh.load_workdirs(self.workdirs))
+        quiet(lh.cmd_new, "fresh", self.tools, workdir=str(self.base), workdirs_file=self.workdirs)
+        self.assertEqual(self.discover()["fresh"].workdir, self.base.resolve())
 
 
 class HelpersTest(unittest.TestCase):
