@@ -221,13 +221,13 @@ lh add "D:\Scripts\video_compress" --group Відео
 local-helper/
 ├── local_helper.py        # лаунчер і всі команди (лише стандартна бібліотека)
 ├── local_helper_tui.py    # інтерфейс у терміналі (Textual)
-├── lh.cmd, local_helper.cmd
+├── lh.cmd, local_helper.cmd, lh   # обгортки для PATH (lh — для Git Bash)
 ├── install.ps1            # додає папку в PATH
 ├── groups.json            # групи тулів (з'являється після першої групи)
 ├── tools/
 │   ├── photos_to_pdf/
 │   └── count_lines/
-├── tests/
+├── tests/                 # unittest + smoke/ (наскрізні перевірки з pwsh і bash)
 ├── docs/                  # скриншот для README
 ├── GUIDE.md               # повний посібник
 └── CLAUDE.md              # правила для Claude Code

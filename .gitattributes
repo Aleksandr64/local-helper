@@ -4,3 +4,5 @@
 *.ps1 text eol=crlf
 # bash не розуміє CRLF
 *.sh text eol=lf
+# обгортка lh для Git Bash — теж лише LF
+/lh text eol=lf

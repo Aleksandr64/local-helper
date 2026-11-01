@@ -47,6 +47,15 @@ python --version
 Команда пишеться як `local_helper` (з підкресленням) або `lh`. Варіант `localhelper` без
 підкреслення не працює.
 
+**У Git Bash** команда теж `lh`: для нього в корені лежить bash-обгортка `lh` без розширення
+(PowerShell і cmd її не бачать і беруть `lh.cmd`). `local_helper` у Git Bash — лише як `local_helper.cmd`.
+
+**Що саме «встановлюється».** Це не програма з інсталятором: нічого не копіюється в
+`Program Files`, немає запису в «Програми та компоненти» чи реєстрі. Уся CLI живе в цій папці, а
+встановлення — це дві речі: `.venv` усередині папки (`lh setup`) і шлях до папки в змінній `Path`
+користувача (`install.ps1`), завдяки якому `lh.cmd` знаходиться з будь-якого терміналу. Тому
+оновлення — це `git pull`, а «видалення» — прибрати папку з `Path` і видалити саму папку.
+
 ---
 
 ## 2. Запуск і користування
@@ -440,6 +449,8 @@ lh setup
 | «Для .ps1-тулів потрібен PowerShell» | встанови PowerShell 7 (`winget install Microsoft.PowerShell`) |
 | `.sh`-тул падає з `$'\r': command not found` | у файлі CRLF; збережи з LF-кінцями рядків |
 | «Робочу папку тулу … не знайдено» | `lh workdir <tool> <нова папка>` або `lh workdir <tool> --clear` |
+| Аргумент з `%ІМ'Я%` (напр. папка `%PATH%`) приходить у тул розгорнутим | так робить cmd.exe з усіма `.cmd`-файлами, у тому числі `lh.cmd`; в PowerShell і cmd такий шлях через `lh` не передати — запусти `python "D:\Dev\Diferrent Tools\local_helper.py" …` або `lh` з Git Bash. Поодинокий `%` (`100%`), `&`, `!`, `^`, `$`, `'`, `[ ]` проходять нормально |
+| `lh: command not found` у Git Bash | перевідкрий Git Bash після `install.ps1`; обгортка `lh` лежить у корені папки |
 
 ---
 
@@ -451,6 +462,7 @@ Diferrent Tools/
 ├── local_helper_tui.py    # графічний інтерфейс у терміналі (Textual)
 ├── local_helper.cmd       # обгортки для PATH; запускають Python з .venv, якщо він є
 ├── lh.cmd
+├── lh                     # та сама обгортка для Git Bash
 ├── install.ps1            # додає папку в PATH користувача
 ├── requirements.txt       # залежності лаунчера (textual)
 ├── registry.json          # підключені тули (створюється автоматично, не в git)
@@ -460,6 +472,7 @@ Diferrent Tools/
 ├── CLAUDE.md              # правила для Claude Code
 ├── .claude/skills/lh-tool/  # скіл Claude: створити тул / підключити скрипт
 ├── tests/                 # тести (unittest)
+│   └── smoke/             # наскрізні перевірки з PowerShell і Git Bash
 └── tools/
     ├── photos_to_pdf/     # фото з папки → один PDF
     └── count_lines/       # статистика файлів і рядків
@@ -468,4 +481,16 @@ Diferrent Tools/
 Запустити тести:
 ```powershell
 .\.venv\Scripts\python.exe -m unittest discover tests
+```
+
+**Наскрізна (smoke) перевірка** запускає справжній `lh` так, як із терміналу: створює тимчасові
+папки з «незручними» назвами (пробіли, кирилиця, `[ ]`, `'`, `&`, `%`, `!`, `$`, `^`, `;`, емодзі),
+підключає в кожній тули `.py`, `.ps1` і `.sh`, перевіряє `-help`, запуск у закріпленій папці,
+передачу аргументу-шляху і `lh workdir`. Тимчасові тули `smoke_*` після себе відключає.
+```powershell
+pwsh -File tests\smoke\smoke.ps1            # через lh.cmd, як у PowerShell
+pwsh -File tests\smoke\smoke.ps1 -Python    # напряму через Python, без cmd.exe
+```
+```bash
+bash tests/smoke/smoke.sh                   # з Git Bash, через обгортку lh
 ```

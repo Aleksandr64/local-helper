@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# Обгортка для Git Bash: `lh ...` так само, як lh.cmd у PowerShell і cmd
+# (вони цей файл без розширення не бачать і беруть lh.cmd).
+dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+py="$dir/.venv/Scripts/python.exe"
+[[ -x "$py" ]] || py="$dir/.venv/bin/python"
+[[ -x "$py" ]] || py=python
+exec "$py" "$dir/local_helper.py" "$@"

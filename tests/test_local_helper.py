@@ -464,6 +464,25 @@ class WorkdirTest(TempDirTest):
         self.assertEqual(self.discover()["fresh"].workdir, self.base.resolve())
 
 
+@unittest.skipUnless(sys.platform == "win32", "POSIX-шляхи Git Bash — лише на Windows")
+class CliPathTest(TempDirTest):
+    def test_drive_form_and_windows_paths(self):
+        self.assertEqual(lh.cli_path("/d/Dev/My Tools"), Path(r"D:\Dev\My Tools"))
+        self.assertEqual(lh.cli_path("/c"), Path("C:\\"))
+        self.assertEqual(lh.cli_path(f'"{self.base}"'), self.base.resolve())
+
+    @unittest.skipUnless(lh.cygpath_w("/tmp"), "cygpath (Git for Windows) не знайдено")
+    def test_msys_mount_with_brackets_and_cyrillic(self):
+        folder = Path(lh.cygpath_w("/tmp")) / f"lh тест [1];x {self.base.name}"
+        folder.mkdir()
+        try:
+            posix = f"/tmp/{folder.name}"
+            self.assertEqual(lh.cli_path(posix), folder.resolve())
+            self.assertEqual(lh.resolve_workdir(posix)[0], folder.resolve())
+        finally:
+            folder.rmdir()
+
+
 class HelpersTest(unittest.TestCase):
     def test_normalize(self):
         self.assertEqual(lh.normalize(" Rename-Photos Now "), "rename_photos_now")

@@ -507,9 +507,41 @@ def set_workdir(tool_name: str, folder: Path | None, workdirs_file: Path = WORKD
     save_registry(mapping, workdirs_file)
 
 
+def cli_path(path: str) -> Path:
+    """Шлях з командного рядка -> абсолютний Path; на Windows розуміє і POSIX-шляхи Git Bash.
+
+    MSYS сам перетворює /c/x і /tmp/x у Windows-шляхи, але не всі: з [ ], ` чи ; доходять як є.
+    """
+    path = unquote(path)
+    if os.name == "nt" and path.startswith("/") and not path.startswith("//"):
+        m = re.match(r"^/([a-zA-Z])(/.*)?$", path)
+        if m:
+            path = f"{m.group(1).upper()}:{m.group(2) or '/'}"
+        else:
+            path = cygpath_w(path) or path
+    return Path(path).expanduser().resolve()
+
+
+def cygpath_w(path: str) -> str | None:
+    """/tmp/x -> C:\\Users\\...\\Temp\\x через cygpath з Git for Windows (None, якщо його немає)."""
+    bash = find_bash()
+    candidates = [shutil.which("cygpath")]
+    if bash:
+        candidates += [str(Path(bash).parent / "cygpath.exe"), str(Path(bash).parents[1] / "usr" / "bin" / "cygpath.exe")]
+    exe = next((c for c in candidates if c and Path(c).is_file()), None)
+    if exe is None:
+        return None
+    try:
+        res = subprocess.run([exe, "-w", path], capture_output=True, text=True, encoding="utf-8",
+                             errors="replace", timeout=10, env={**os.environ, "LC_ALL": "C.UTF-8"})
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return res.stdout.strip() if res.returncode == 0 and res.stdout.strip() else None
+
+
 def resolve_workdir(folder: str) -> tuple[Path | None, str]:
     """Папка для `workdir`: відносна — від поточної; має існувати."""
-    p = Path(unquote(folder)).expanduser().resolve()
+    p = cli_path(folder)
     if not p.is_dir():
         return None, f"Папку не знайдено: {p}"
     return p, ""
@@ -845,7 +877,7 @@ def cmd_add(path: str, name: str | None = None, entry: str | None = None,
             tools_dir: Path = TOOLS_DIR, registry: Path = REGISTRY,
             group: str | None = None, groups_file: Path = GROUPS,
             workdir: str | None = None, workdirs_file: Path = WORKDIRS) -> int:
-    p = Path(path).expanduser().resolve()
+    p = cli_path(path)
     if not p.exists():
         print(f"Шлях не знайдено: {p}", file=sys.stderr)
         return 1

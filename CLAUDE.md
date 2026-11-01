@@ -32,6 +32,7 @@ Diferrent Tools/
 ├── local_helper_tui.py   # повноекранний TUI на Textual (`lh` без аргументів)
 ├── local_helper.cmd      # обгортки для PATH; запускають Python з .venv, якщо він є
 ├── lh.cmd
+├── lh                    # та сама обгортка для Git Bash (без розширення, LF)
 ├── install.ps1           # додає папку в PATH користувача
 ├── registry.json         # підключені командою `add` зовнішні тули (шляхи на цьому ПК, не в git)
 ├── groups.json           # групи тулів: ім'я тулу → група (в git)
@@ -42,6 +43,7 @@ Diferrent Tools/
 ├── docs/screenshot.svg   # знімок TUI для README (генерується через App.save_screenshot)
 ├── requirements.txt      # залежності лаунчера (textual)
 ├── tests/                # unittest: test_local_helper.py, test_tui.py, test_<tool>.py
+│   └── smoke/            # smoke.ps1 і smoke.sh: наскрізна перевірка lh з «незручними» шляхами
 └── tools/
     └── <tool_name>/
         ├── main.py           # точка входу; docstring = опис для `list` і `-help`
@@ -112,5 +114,7 @@ Python — мова за замовчуванням. `.ps1` — коли про�
   один реальний сценарій на тестових даних.
 - Тестові та тимчасові файли створювати в тимчасовій папці, а не в репозиторії.
 - Після змін у `local_helper.py` запускати `.\.venv\Scripts\python.exe -m unittest discover tests`.
+- Після змін у запуску тулів, шляхах чи обгортках (`lh.cmd`, `lh`) — ще й smoke-перевірки:
+  `pwsh -File tests\smoke\smoke.ps1` і `bash tests/smoke/smoke.sh` (див. GUIDE.md, розділ 11).
 - Формальні тести для тулів пишуться лише коли логіка нетривіальна; кладуться в
   `tests/test_<name>.py`.
